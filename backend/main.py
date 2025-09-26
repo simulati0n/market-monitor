@@ -1,10 +1,13 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 import yfinance as yf
 from cachetools import TTLCache
 from fastapi.middleware.cors import CORSMiddleware
+import pandas as pd
+import numpy as np
+from sklearn.linear_model import LinearRegression
 
 app = FastAPI()
-#This app caches prices for 15 seconds to avoid API limits. 
+#This app caches prices for 15 seconds to avoid API limits.
 #For live-trading, this would be replaced by a real-time paid data feed.
 
 app.add_middleware(
@@ -19,7 +22,6 @@ cache = TTLCache(maxsize=100, ttl=10)
 
 @app.get("/api/price/{symbol}")
 def get_price(symbol: str):
-
     if symbol in cache:
         return cache[symbol]
 
@@ -27,7 +29,7 @@ def get_price(symbol: str):
     data = ticker.history(period="2d", interval="1d")
 
     if data.empty or len(data) < 2:
-        return {"error": "No data found. Check the spelling of the symbol."}
+        raise HTTPException(status_code=404, detail="Ticker not found")
 
     # Get previous close and latest close
     previous_close = data["Close"].iloc[-2]
@@ -44,7 +46,6 @@ def get_price(symbol: str):
 
     cache[symbol] = result
     return result
-
 
 @app.get("/api/history/{symbol}")
 def get_history(symbol: str, period: str = "1mo", interval: str = "1d"):
@@ -68,14 +69,44 @@ def get_ticker_data():
             change_percent = ((latest_close - prev_close) / prev_close) * 100
             data.append({
                 "symbol": symbol,
-                "change_percent": round(change_percent, 2) 
+                "change_percent": round(change_percent, 2)
             })
     return data  
 
+def predict_price(ticker: str):
+    # Fetch last 6 months of daily data
+    data = yf.download(ticker, period="3mo", interval="1d")
+    if data.empty:
+        return None
+   
+    data = data.reset_index()
+    data["Day"] = np.arange(len(data))
+   
+    X = data[["Day"]]
+    y = data["Close"]
+    model = LinearRegression()
+    model.fit(X, y)
 
+    next_day = [[len(data)]]
+    predicted_price = model.predict(next_day)[0]
+    return round(float(predicted_price), 2)
 
+@app.get("/predict/{ticker}")
+def get_prediction(ticker: str):
+    price = predict_price(ticker)
+    if price is None:
+        raise HTTPException(status_code=404, detail="Ticker not found")
+    return {"ticker": ticker.upper(), "predicted_price": price}
 
-    
-    
-
-
+@app.get("/api/validate/{ticker}")
+def validate_ticker(ticker: str):
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+       
+        if not info or 'symbol' not in info:
+            raise HTTPException(status_code=404, detail="Ticker not found")
+           
+        return {"valid": True, "symbol": ticker.upper()}
+    except:
+        raise HTTPException(status_code=404, detail="Ticker not found")
